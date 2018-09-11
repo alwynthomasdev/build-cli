@@ -4,6 +4,8 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 
+//TODO: do i need to throw so many exceptions ???
+
 namespace BuildCli
 {
     public class CliManager
@@ -26,27 +28,41 @@ namespace BuildCli
 
 
         /// <summary>
-        /// Parse and invoke a command with all its parts in a string array. Intended to be used strait from the console/terminal where command args are passed to the program as args.
+        /// Parse and run a command with all its parts in a string array. Intended to be used strait from the console/terminal where command args are passed to the program as args.
         /// </summary>
         /// <param name="commandArgs">The command details as an array of strings</param>
-        /// <param name="onParseError">How should parse errors be handled</param>
-        public void Invoke(string[] commandArgs, Action<string> onParseError)
+        /// <param name="onError">How should errors be handled</param>
+        public void Run(string[] commandArgs, Action<Exception> onError)
         {
-            CliCommand cmd = Parse(commandArgs);
-            if (!cmd.Success) onParseError(cmd.Error);
-            else cmd.Invoke(cmd.Parameters);
+            try
+            {
+                ParseResult parseResult = Parse(commandArgs);
+                CliCommand cmd = Build(parseResult);
+                cmd.Invoke(cmd.Parameters);
+            }
+            catch (Exception ex)
+            {
+                onError(ex);
+            }
         }
 
         /// <summary>
-        /// Parse and invoke a command that is in the form as a string. Intended for use when the application is reading input from the console/terminal.
+        /// Parse and run a command that is in the form as a string. Intended for use when the application is reading input from the console/terminal.
         /// </summary>
         /// <param name="commandString">The command string to parse</param>
-        /// <param name="onParseError">How should parse errors be handled</param>
-        public void Invoke(string commandString, Action<string> onParseError)
+        /// <param name="onError">How should errors be handled</param>
+        public void Run(string commandString, Action<Exception> onError)
         {
-            CliCommand cmd = Parse(commandString);
-            if (!cmd.Success) onParseError(cmd.Error);
-            else cmd.Invoke(cmd.Parameters);
+            try
+            {
+                ParseResult parseResult = Parse(commandString);
+                CliCommand cmd = Build(parseResult);
+                cmd.Invoke(cmd.Parameters);
+            }
+            catch(Exception ex)
+            {
+                onError(ex);
+            }
         }
 
         /// <summary>
@@ -81,60 +97,46 @@ namespace BuildCli
 
         List<CliCommandDefinition> _CommandCollection;
 
-        CliCommand Parse(string[] cmdAry)
+        CliCommand Build(ParseResult parseResult)
         {
-            RawParseResult parseResult = ParseRaw(cmdAry);
-            return Parse(parseResult);
-        }
-        CliCommand Parse(string cmdString)
-        {
-            RawParseResult parseResult = ParseRaw(cmdString);
-            return Parse(parseResult);
-        }
-        CliCommand Parse(RawParseResult parseResult)
-        {
-            if (parseResult.Success)
+            if (parseResult.CommandName == "help")
+                return GenerateHelpCommand();
+
+            CliCommandDefinition cmdDef = _CommandCollection.Where(c => c.Name == parseResult.CommandName.ToLower() || c.Aliases.Contains(parseResult.CommandName.ToLower())).SingleOrDefault();
+
+            if (parseResult.Help)
             {
-                if (parseResult.CommandName == "help")
-                    return GenerateHelpCommand();
-
-                CliCommandDefinition cmdDef = _CommandCollection.Where(c => c.Name == parseResult.CommandName.ToLower() || c.Aliases.Contains(parseResult.CommandName.ToLower())).SingleOrDefault();
-
-                if (parseResult.Help)
-                {
-                    return GenerateHelpCommand(cmdDef);
-                }
-
-                Dictionary<string, string> rawParams = parseResult.RawParameters;
-                Dictionary<string, object> realParams = new Dictionary<string, object>();
-
-                if (cmdDef != null)
-                {
-                    foreach (string k in rawParams.Keys)
-                    {
-                        CliParameter cliParam = cmdDef.Parameters.Where(d => d.Name.ToLower() == k.ToLower() || d.Aliases.Contains(k.ToLower()) || d.Ordinal.ToString() == k).FirstOrDefault();
-                        if (cliParam != null)
-                        {
-                            if (!cliParam.Validator(rawParams[k]))
-                            {
-                                return new CliCommand { Success = false, Error = cliParam.ValidatorErrorMessage };
-                            }
-                            realParams[cliParam.Name] = rawParams[k];
-                        }
-                        else
-                        {
-                            int i = 0;
-                            return new CliCommand { Success = false, Error = $"Command '{cmdDef.Name}' has no parameter defined {(int.TryParse(k, out i) ? $"at postion {i}" : $"'{k}'")}." };
-                        }
-                    }
-                    return new CliCommand { Success = true, Invoke = cmdDef.Command, Parameters = realParams };
-                }
-                else return new CliCommand { Success = false, Error = $"Command '{parseResult.CommandName}' not found." };
+                return GenerateHelpCommand(cmdDef);
             }
-            else return new CliCommand { Success = false, Error = parseResult.Error };
+
+            Dictionary<string, string> rawParams = parseResult.RawParameters;
+            Dictionary<string, object> realParams = new Dictionary<string, object>();
+
+            if (cmdDef != null)
+            {
+                foreach (string k in rawParams.Keys)
+                {
+                    CliParameter cliParam = cmdDef.Parameters.Where(d => d.Name.ToLower() == k.ToLower() || d.Aliases.Contains(k.ToLower()) || d.Ordinal.ToString() == k).FirstOrDefault();
+                    if (cliParam != null)
+                    {
+                        if (!cliParam.Validator(rawParams[k]))
+                        {
+                            throw new BuildCliParseException(cliParam.ValidatorErrorMessage);
+                        }
+                        realParams[cliParam.Name] = rawParams[k];
+                    }
+                    else
+                    {
+                        int i = 0;
+                        throw new BuildCliParseException($"Command '{cmdDef.Name}' has no parameter defined {(int.TryParse(k, out i) ? $"at postion {i}" : $"'{k}'")}.");
+                    }
+                }
+                return new CliCommand { Invoke = cmdDef.Command, Parameters = realParams };
+            }
+            else throw new BuildCliParseException($"Command '{parseResult.CommandName}' not found.");
         }
 
-        RawParseResult ParseRaw(string[] ary)
+        ParseResult Parse(string[] ary)
         {
             string cmdName = "";
             Dictionary<string, string> cmdParams = new Dictionary<string, string>();
@@ -149,12 +151,12 @@ namespace BuildCli
                     cmdName = ary[i];
                     if (cmdName.ToLower() == "help")
                     {
-                        return new RawParseResult { CommandName = "help", Help = true, Success = true };
+                        return new ParseResult { CommandName = "help", Help = true };
                     }
                 }
                 else if (i == 1 && ary[i].ToLower().Replace("-", "") == "help")
                 {
-                    return new RawParseResult { CommandName = cmdName, Help = true, Success = true };
+                    return new ParseResult { CommandName = cmdName, Help = true };
                 }
                 else
                 {
@@ -179,7 +181,7 @@ namespace BuildCli
                         x = x.Replace("-", "");
                         if (string.IsNullOrWhiteSpace(x))
                         {
-                            return new RawParseResult { Success = false, Error = $"Unable to read parameter name." };
+                            throw new BuildCliParseException($"Unable to read parameter name.");
                         }
                         else
                         {
@@ -194,20 +196,17 @@ namespace BuildCli
 
                 }
             }
-            return new RawParseResult { Success = true, CommandName = cmdName, RawParameters = cmdParams };
+            return new ParseResult { CommandName = cmdName, RawParameters = cmdParams };
         }
 
-        RawParseResult ParseRaw(string cmdString)
+        ParseResult Parse(string cmdString)
         {
             if (!string.IsNullOrWhiteSpace(cmdString))
             {
                 string[] parts = cmdString.Split(' ');
-                return ParseRaw(parts);
+                return Parse(parts);
             }
-            else
-            {
-                return new RawParseResult { Success = false, Error = $"Failed to read command." };
-            }
+            else throw new BuildCliParseException($"Failed to read command.");
         }
 
         CliCommand GenerateHelpCommand()
@@ -215,8 +214,6 @@ namespace BuildCli
             if (HelpCommand == null) throw new NotImplementedException("A help command has not been defined.");
 
             CliCommand cmd = new CliCommand();
-            cmd.Help = true;
-            cmd.Success = true;
 
             Dictionary<string, object> param = new Dictionary<string, object>();
             param["HelpText"] = GenerateHelpText();
@@ -231,8 +228,6 @@ namespace BuildCli
             if (HelpCommand == null) throw new NotImplementedException("A help command has not been defined.");
 
             CliCommand cmd = new CliCommand();
-            cmd.Help = true;
-            cmd.Success = true;
 
             Dictionary<string, object> param = new Dictionary<string, object>();
             param["HelpText"] = GenerateHelpText(cmdDef);
@@ -307,4 +302,11 @@ namespace BuildCli
         #endregion
 
     }
+
+    public class BuildCliParseException : Exception
+    {
+        public BuildCliParseException(string message) : base(message) { }
+        public BuildCliParseException(string message, Exception innerEx) : base(message, innerEx) { }
+    }
+
 }
