@@ -4,8 +4,6 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 
-//TODO: do i need to throw so many exceptions ???
-
 namespace BuildCli
 {
     public class CliManager
@@ -25,24 +23,34 @@ namespace BuildCli
         /// Define a function for displaying the help/documentation
         /// </summary>
         public Action<string> HelpCommand { get; set; }
-
+        /// <summary>
+        /// Define a function to handle how simple errors such as command parse errors are handled and displayed (will throw BuildCliException otherwise)
+        /// </summary>
+        public Action<string> HandleErrorCommand { get; set; }
+        /// <summary>
+        /// Define a function to handle exceptions that are thrown during parse, build and execution of commands.
+        /// </summary>
+        public Action<Exception> HandleExceptionCommand { get; set; }
 
         /// <summary>
         /// Parse and run a command with all its parts in a string array. Intended to be used strait from the console/terminal where command args are passed to the program as args.
         /// </summary>
         /// <param name="commandArgs">The command details as an array of strings</param>
-        /// <param name="onError">How should errors be handled</param>
-        public void Run(string[] commandArgs, Action<Exception> onError)
+        public void Run(string[] commandArgs)
         {
             try
             {
-                ParseResult parseResult = Parse(commandArgs);
-                CliCommand cmd = Build(parseResult);
+                ParseResult result = Parse(commandArgs);
+                CliCommand cmd = null;
+                if (!string.IsNullOrWhiteSpace(result.Error))
+                    cmd = Build(result);
+                else cmd = GenerateErrorCommand(result.Error);
                 cmd.Invoke(cmd.Parameters);
             }
             catch (Exception ex)
             {
-                onError(ex);
+                if (HandleExceptionCommand == null) throw;
+                HandleExceptionCommand(ex);
             }
         }
 
@@ -50,18 +58,21 @@ namespace BuildCli
         /// Parse and run a command that is in the form as a string. Intended for use when the application is reading input from the console/terminal.
         /// </summary>
         /// <param name="commandString">The command string to parse</param>
-        /// <param name="onError">How should errors be handled</param>
-        public void Run(string commandString, Action<Exception> onError)
+        public void Run(string commandString)
         {
             try
             {
-                ParseResult parseResult = Parse(commandString);
-                CliCommand cmd = Build(parseResult);
+                ParseResult result = Parse(commandString);
+                CliCommand cmd = null;
+                if (!string.IsNullOrWhiteSpace(result.Error))
+                    cmd = Build(result);
+                else cmd = GenerateErrorCommand(result.Error);
                 cmd.Invoke(cmd.Parameters);
             }
             catch(Exception ex)
             {
-                onError(ex);
+                if (HandleExceptionCommand == null) throw;
+                HandleExceptionCommand(ex);
             }
         }
 
@@ -121,19 +132,19 @@ namespace BuildCli
                     {
                         if (!cliParam.Validator(rawParams[k]))
                         {
-                            throw new BuildCliParseException(cliParam.ValidatorErrorMessage);
+                            return GenerateErrorCommand(cliParam.ValidatorErrorMessage);
                         }
                         realParams[cliParam.Name] = rawParams[k];
                     }
                     else
                     {
                         int i = 0;
-                        throw new BuildCliParseException($"Command '{cmdDef.Name}' has no parameter defined {(int.TryParse(k, out i) ? $"at postion {i}" : $"'{k}'")}.");
+                        return GenerateErrorCommand($"Command '{cmdDef.Name}' has no parameter defined {(int.TryParse(k, out i) ? $"at postion {i}" : $"'{k}'")}.");
                     }
                 }
                 return new CliCommand { Invoke = cmdDef.Command, Parameters = realParams };
             }
-            else throw new BuildCliParseException($"Command '{parseResult.CommandName}' not found.");
+            else return GenerateErrorCommand($"Command '{parseResult.CommandName}' not found.");
         }
 
         ParseResult Parse(string[] ary)
@@ -181,7 +192,7 @@ namespace BuildCli
                         x = x.Replace("-", "");
                         if (string.IsNullOrWhiteSpace(x))
                         {
-                            throw new BuildCliParseException($"Unable to read parameter name.");
+                            return new ParseResult { Error = $"Unable to read parameter name." };
                         }
                         else
                         {
@@ -206,7 +217,7 @@ namespace BuildCli
                 string[] parts = cmdString.Split(' ');
                 return Parse(parts);
             }
-            else throw new BuildCliParseException($"Failed to read command.");
+            else return new ParseResult { Error = $"Failed to read command." };
         }
 
         CliCommand GenerateHelpCommand()
@@ -288,6 +299,28 @@ namespace BuildCli
             return txt;
         }
 
+        CliCommand GenerateErrorCommand(string err)
+        {
+            if (HandleErrorCommand == null) throw new BuildCliException(err);
+
+            CliCommand cmd = new CliCommand();
+            Dictionary<string, object> param = new Dictionary<string, object>();
+            param["Error"] = err;
+            cmd.Parameters = param;
+            cmd.Invoke = (p) => HandleErrorCommand(p["Error"].ToString());
+            return cmd;
+        }
+
+        CliCommand GenerateExceptionCommand(Exception ex)
+        {
+            CliCommand cmd = new CliCommand();
+            Dictionary<string, object> param = new Dictionary<string, object>();
+            param["Exception"] = ex;
+            cmd.Parameters = param;
+            cmd.Invoke = (p) => HandleExceptionCommand((Exception)p["Exception"]);
+            return cmd;
+        }
+
         string CommaString(IEnumerable<string> lst)
         {
             string r = "";
@@ -303,10 +336,10 @@ namespace BuildCli
 
     }
 
-    public class BuildCliParseException : Exception
+    public class BuildCliException : Exception
     {
-        public BuildCliParseException(string message) : base(message) { }
-        public BuildCliParseException(string message, Exception innerEx) : base(message, innerEx) { }
+        public BuildCliException(string message) : base(message) { }
+        public BuildCliException(string message, Exception innerEx) : base(message, innerEx) { }
     }
 
 }
